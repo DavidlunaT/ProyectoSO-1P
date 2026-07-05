@@ -1,0 +1,14 @@
+{
+    "tipos": {
+        "correo": ["Thank", "Please", "Reg", "ards", "Meeting", "Attached", "Information", "Update", "Schedule", "Team", "Project"],
+        "articulo": ["Data", "Analysis", "Results", "Method", "Study", "Model", "Research", "System", "Significant", "Effect"],
+        "reporte": ["System", "Data", "Network", "Security", "Application", "Server", "User", "Performance", "Service", "Infrastructure"]
+    },
+    "resultados": {
+        "Personal administrativo": ["correo"],
+        "Personal tecnico": ["correo", "reporte"],
+        "Profesor": ["correo", "articulo"],
+        "Estudiante": ["articulo", "reporte"]
+        
+    }
+}
