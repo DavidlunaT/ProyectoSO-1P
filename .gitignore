@@ -53,3 +53,11 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Project generated files
+*.txt
+*.log
+/launcher
+/server
+/window
+/pseudoAI_model
