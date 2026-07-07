@@ -15,3 +15,6 @@ Para borrar los archivos generados, ejecuta:
 ```bash
 make clean
 ```
+## Uso del programa
+
+Ejecutar solo el programa "./launcher" 

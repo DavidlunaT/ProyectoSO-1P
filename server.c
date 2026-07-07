@@ -1,9 +1,5 @@
-//Se encarga de recibir los mensajes del cliente 
-//Guarda la información recibida de manera ordenada, indicando de donde provino, y el contenido en ella.
-//Toda esta data será guarda en un archivo de texto.
-//Cuando un window es terminado, se encarga de enviar todos los datos referente a ese windowal pseudoAI_model
-//Cuando el pseudoAI_model termina, debe regresar los resultados al servidor y guardarse en un archivo de texto.
-//Cuando el servidor recibe los resultados, debe enviarlos al launcher para que este los muestre
+//Servidor: recibe eventos del cliente, los guarda y coordina el analisis final.
+//Cuando una ventana termina, deriva su texto al modelo y reenvia el resultado al launcher.
 
 #include <errno.h>
 #include <ctype.h>
@@ -16,12 +12,8 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "config.h"
 
-#define MAX_WINDOWS 64
-#define MAX_TEXT 4096
-
-static const char *SERVER_SOCKET_PATH = "/tmp/proyecto_so_server.sock";
-static const char *runtime_dir = ".";
 static char launcher_socket_path[108] = {0};
 
 typedef struct {
@@ -33,11 +25,15 @@ typedef struct {
 static WindowData windows[MAX_WINDOWS];
 static int server_socket_fd = -1;
 
+// Inicializa o valida el directorio de trabajo en tiempo de ejecucion.
 static void ensure_runtime_dir(void) {
-	(void)runtime_dir;
+	// Actualmente se usa el directorio actual, por eso no requiere creacion explicita.
+	(void)RUNTIME_DIR;
 }
 
+// Busca una ventana por PID y opcionalmente crea un slot nuevo.
 static WindowData *get_window(pid_t pid, int create) {
+	// Primero intenta encontrar un registro existente para reutilizarlo.
 	for (int index = 0; index < MAX_WINDOWS; ++index) {
 		if (windows[index].active && windows[index].pid == pid) {
 			return &windows[index];
@@ -59,7 +55,9 @@ static WindowData *get_window(pid_t pid, int create) {
 	return NULL;
 }
 
+// Agrega una linea al final de un archivo de log.
 static void append_to_file(const char *path, const char *line) {
+	// Abre en modo append para no perder entradas previas.
 	FILE *file = fopen(path, "a");
 	if (file == NULL) {
 		return;
@@ -68,7 +66,9 @@ static void append_to_file(const char *path, const char *line) {
 	fclose(file);
 }
 
+// Sobrescribe un archivo de texto con el estado actual de una ventana.
 static void write_text_file(const char *path, const char *text) {
+	// Se usa modo write para mantener solo la ultima version del contenido.
 	FILE *file = fopen(path, "w");
 	if (file == NULL) {
 		return;
@@ -77,7 +77,9 @@ static void write_text_file(const char *path, const char *text) {
 	fclose(file);
 }
 
+// Garantiza que el resultado final no quede vacio o solo con espacios.
 static void normalize_result(char *result, size_t capacity) {
+	// Si la salida del modelo no trae contenido visible, aplica un mensaje fallback.
 	const char *fallback = "informacion insuficiente para determinar el tipo de documento";
 	int has_visible_content = 0;
 
@@ -93,7 +95,9 @@ static void normalize_result(char *result, size_t capacity) {
 	}
 }
 
+// Envia mensajes asincronos al launcher por socket UNIX datagrama.
 static void send_to_launcher(const char *type, pid_t pid, const char *payload) {
+	// Si no existe ruta configurada para launcher, no se intenta enviar nada.
 	if (launcher_socket_path[0] == '\0') {
 		return;
 	}
@@ -114,7 +118,9 @@ static void send_to_launcher(const char *type, pid_t pid, const char *payload) {
 	close(socket_fd);
 }
 
+// Aplica una tecla recibida sobre el buffer de texto de una ventana.
 static void update_text(WindowData *window, const char *key) {
+	// Maneja teclas especiales y caracteres simples respetando limites de buffer.
 	if (strcmp(key, "BackSpace") == 0) {
 		size_t length = strlen(window->text);
 		if (length > 0) {
@@ -141,9 +147,11 @@ static void update_text(WindowData *window, const char *key) {
 	}
 }
 
+// Ejecuta pseudoAI_model para una ventana y captura su salida estandar.
 static void run_pseudo_ai(pid_t pid) {
+	// El analizador corre en un hijo y su salida se captura por un pipe.
 	char input_path[256];
-	snprintf(input_path, sizeof(input_path), "%s/window_%d.txt", runtime_dir, (int)pid);
+	snprintf(input_path, sizeof(input_path), "%s/window_%d.txt", RUNTIME_DIR, (int)pid);
 
 	int pipefd[2];
 	if (pipe(pipefd) < 0) {
@@ -183,7 +191,9 @@ static void run_pseudo_ai(pid_t pid) {
 	send_to_launcher("RESULT", pid, result);
 }
 
+// Interpreta y procesa un mensaje de protocolo recibido desde una ventana.
 static void handle_message(const char *message) {
+	// Formato esperado: TIPO|PID|PAYLOAD.
 	char buffer[MAX_TEXT + 64];
 	snprintf(buffer, sizeof(buffer), "%s", message);
 
@@ -213,7 +223,7 @@ static void handle_message(const char *message) {
 		append_to_file("./server.log", log_line);
 
 		char window_log_path[256];
-		snprintf(window_log_path, sizeof(window_log_path), "%s/window_%d.txt", runtime_dir, (int)pid);
+		snprintf(window_log_path, sizeof(window_log_path), "%s/window_%d.txt", RUNTIME_DIR, (int)pid);
 		write_text_file(window_log_path, window->text);
 		send_to_launcher("TEXT", pid, window->text);
 		return;
@@ -227,7 +237,9 @@ static void handle_message(const char *message) {
 	}
 }
 
+// Punto de entrada: levanta el socket del servidor y atiende mensajes continuamente.
 int main(int argc, char **argv) {
+	// Inicializa dependencias del servidor y ejecuta el bucle principal de recepcion.
 	ensure_runtime_dir();
 
 	if (argc > 1) {
@@ -252,6 +264,7 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
+	//Bucle principal del servidor.
 	while (1) {
 		char message[MAX_TEXT + 64];
 		ssize_t received = recvfrom(server_socket_fd, message, sizeof(message) - 1, 0, NULL, NULL);

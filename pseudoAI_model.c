@@ -1,22 +1,12 @@
-//Recibe la data de un window desde el server y la procesa para determinar el tipo de documento que es (correo, articulo o reporte) y indica cual es el resultado
-//Hace uso de un diccionario (diccionarios.json) para determinar el tipo de documento
-//se van a crear variables dependiendo de las keys en diccionarios.json, y se van a ir sumando los valores de cada palabra que se encuentre en el texto recibido
-//Una vez se finalize de recorrer el texto y tener los resultados, debe existir una variable que sea el umbral para que se determine si pertnece o no a un tipo de documento, si el valor es mayor al umbral, se determina que pertenece a ese tipo de documento
-//En documento "diccionarios.json" tambien se encuentra la lógica para determinar los resultados, en este caso las keys representan el resultado y los values serían el tipo de documento al cual pertenece. Se debe extraer la logica del resultado de aqui.
-//si el texto cumple con los 3 tipos de documentos, solo tomar los 2 con mayor valor 
-//Si no pertenece a ningun tipo de documento, hay que decir que hay información insuficiente para determinar el tipo de documento
-//Si no entra en ningun tipo de resultado, indicar que no se pudo determinar el resultado con la información recibida
+//Analiza el texto recibido y decide que tipo de documento describe.
+//Primero calcula puntajes por tipo y luego aplica las reglas definidas en el JSON.
 
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-
-#define MAX_TYPES 3
-#define MAX_WORDS 32
-#define MAX_WORD_LENGTH 64
-#define MAX_TEXT 4096
+#include "config.h"
 
 typedef struct {
 	char name[32];
@@ -30,7 +20,9 @@ typedef struct {
 	int type_count;
 } ResultRule;
 
+// Carga un archivo completo en memoria y devuelve un buffer terminado en '\0'.
 static char *load_file(const char *path) {
+	// Abre el archivo en modo lectura para obtener su contenido bruto.
 	FILE *file = fopen(path, "r");
 	if (file == NULL) {
 		return NULL;
@@ -46,13 +38,20 @@ static char *load_file(const char *path) {
 		return NULL;
 	}
 
-	fread(content, 1, (size_t)size, file);
+	size_t bytes_read = fread(content, 1, (size_t)size, file);
+	if (bytes_read != (size_t)size && ferror(file)) {
+		free(content);
+		fclose(file);
+		return NULL;
+	}
 	content[size] = '\0';
 	fclose(file);
 	return content;
 }
 
+// Copia una cadena convirtiendo todos los caracteres alfabeticos a minuscula.
 static void lowercase_copy(char *destination, const char *source, size_t capacity) {
+	// Recorre la fuente y corta cuando se agota la capacidad del destino.
 	size_t index = 0;
 	for (; source[index] != '\0' && index + 1 < capacity; ++index) {
 		destination[index] = (char)tolower((unsigned char)source[index]);
@@ -60,7 +59,9 @@ static void lowercase_copy(char *destination, const char *source, size_t capacit
 	destination[index] = '\0';
 }
 
+// Cuenta apariciones no solapadas de una palabra dentro de un texto.
 static int count_occurrences(const char *text, const char *word) {
+	// Si la palabra esta vacia, no hay coincidencias validas para contar.
 	int count = 0;
 	size_t word_length = strlen(word);
 	if (word_length == 0) {
@@ -76,10 +77,26 @@ static int count_occurrences(const char *text, const char *word) {
 	return count;
 }
 
+// Extrae del JSON la lista de palabras asociadas a un tipo documental.
 static void extract_words(const char *json, const char *type_name, DocumentType *type) {
-	char pattern[64];
-	snprintf(pattern, sizeof(pattern), "\"%s\"", type_name);
-	const char *type_section = strstr(json, pattern);
+	// Localiza la seccion del tipo y carga cada token entre comillas.
+	// Search for "tipo": pattern safely without snprintf
+	size_t type_len = strlen(type_name);
+	if (type_len == 0 || type_len > MAX_WORD_LENGTH) {
+		return;
+	}
+
+	// Manually construct search without snprintf to avoid truncation warning
+	const char *cursor = json;
+	const char *type_section = NULL;
+	while ((cursor = strchr(cursor, '"')) != NULL) {
+		if (strncmp(cursor + 1, type_name, type_len) == 0 && cursor[1 + type_len] == '"') {
+			type_section = cursor;
+			break;
+		}
+		cursor++;
+	}
+
 	if (type_section == NULL) {
 		return;
 	}
@@ -91,9 +108,9 @@ static void extract_words(const char *json, const char *type_name, DocumentType 
 	}
 
 	type->word_count = 0;
-	const char *cursor = open_bracket;
-	while (cursor < close_bracket && type->word_count < MAX_WORDS) {
-		const char *start = strchr(cursor, '"');
+	const char *word_cursor = open_bracket;
+	while (word_cursor < close_bracket && type->word_count < MAX_WORDS) {
+		const char *start = strchr(word_cursor, '"');
 		if (start == NULL || start >= close_bracket) {
 			break;
 		}
@@ -108,11 +125,13 @@ static void extract_words(const char *json, const char *type_name, DocumentType 
 			type->words[type->word_count][length] = '\0';
 			++type->word_count;
 		}
-		cursor = end + 1;
+		word_cursor = end + 1;
 	}
 }
 
+// Extrae del JSON las reglas finales que combinan uno o dos tipos.
 static void extract_rules(const char *json, ResultRule *rules, int *rule_count) {
+	// Recorre el bloque "resultados" y guarda nombre y tipos de cada regla.
 	const char *cursor = strstr(json, "\"resultados\"");
 	if (cursor == NULL) {
 		*rule_count = 0;
@@ -181,7 +200,9 @@ static void extract_rules(const char *json, ResultRule *rules, int *rule_count) 
 	}
 }
 
+// Verifica si una regla coincide exactamente con el conjunto de tipos detectados.
 static int match_rule(const ResultRule *rule, const char *types[], int type_count) {
+	// Requiere misma cantidad de tipos y coincidencia por nombre sin importar orden.
 	if (rule->type_count != type_count) {
 		return 0;
 	}
@@ -201,7 +222,9 @@ static int match_rule(const ResultRule *rule, const char *types[], int type_coun
 	return 1;
 }
 
+// Punto de entrada: clasifica el texto segun diccionarios y reglas declaradas.
 int main(int argc, char **argv) {
+	// Valida argumentos, carga insumos y ejecuta el flujo completo de clasificacion.
 	if (argc < 2) {
 		return 1;
 	}
@@ -231,7 +254,7 @@ int main(int argc, char **argv) {
 	lowercase_copy(text_lower, text, sizeof(text_lower));
 
 	int scores[MAX_TYPES] = {0, 0, 0};
-	const int threshold = 0;
+	const int threshold = AI_THRESHOLD;
 	int qualifying = 0;
 
 	for (int type_index = 0; type_index < MAX_TYPES; ++type_index) {

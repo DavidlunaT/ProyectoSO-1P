@@ -1,5 +1,5 @@
-//launcher, ventana principal donde se interactuara con el sistema
-//Debe ser una consola interactiva donde cumpla con todo lo indicado más abajo
+//Launcher principal: muestra el estado de las ventanas y permite controlarlas.
+//Coordina el servidor, crea ventanas y resume la informacion al usuario.
 
 #include <errno.h>
 #include <pthread.h>
@@ -11,13 +11,7 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-#define MAX_WINDOWS 64
-#define MAX_TEXT 2048
-
-static const char *SERVER_SOCKET_PATH = "/tmp/proyecto_so_server.sock";
-static const char *LAUNCHER_SOCKET_PATH = "/tmp/proyecto_so_launcher.sock";
-static const char *RUNTIME_DIR = ".";
+#include "config.h"
 
 typedef struct {
     pid_t pid;
@@ -32,7 +26,9 @@ static pthread_mutex_t processes_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int launcher_socket_fd = -1;
 static pid_t server_pid = -1;
 
+// Busca el registro de una ventana/proceso por su PID.
 static ProcessInfo *find_process(pid_t pid) {
+	// Recorre la tabla de procesos activos para ubicar el slot correspondiente.
     for (int index = 0; index < MAX_WINDOWS; ++index) {
         if (processes[index].active && processes[index].pid == pid) {
             return &processes[index];
@@ -41,7 +37,9 @@ static ProcessInfo *find_process(pid_t pid) {
     return NULL;
 }
 
+// Carga el texto persistido de una ventana desde su archivo local.
 static void load_text_from_file(pid_t pid, char *destination, size_t capacity) {
+	// Construye la ruta por PID y copia el contenido con terminacion segura en '\0'.
     char path[256];
     snprintf(path, sizeof(path), "%s/window_%d.txt", RUNTIME_DIR, (int)pid);
 
@@ -55,7 +53,9 @@ static void load_text_from_file(pid_t pid, char *destination, size_t capacity) {
     fclose(file);
 }
 
+// Busca en results.log el ultimo resultado asociado a un PID.
 static void load_result_from_log(pid_t pid, char *destination, size_t capacity) {
+	// Lee linea por linea y conserva la coincidencia mas reciente para esa ventana.
     FILE *file = fopen("./results.log", "r");
     if (file == NULL) {
         return;
@@ -81,11 +81,14 @@ static void load_result_from_log(pid_t pid, char *destination, size_t capacity) 
     }
 }
 
+// Sincroniza un registro en memoria con los archivos persistidos en disco.
 static void sync_process_from_disk(ProcessInfo *process) {
+	// Recupera texto y resultado cuando el launcher se reinicia o pierde estado local.
     if (process == NULL) {
         return;
     }
 
+    //Si el launcher se reinicia, reconstruye el estado desde los archivos locales.
     if (process->text[0] == '\0') {
         load_text_from_file(process->pid, process->text, sizeof(process->text));
     }
@@ -95,7 +98,9 @@ static void sync_process_from_disk(ProcessInfo *process) {
     }
 }
 
+// Asegura que exista un slot activo para una ventana recien creada.
 static void ensure_window_slot(pid_t pid) {
+	// Evita duplicados y usa el primer espacio libre cuando el PID es nuevo.
     pthread_mutex_lock(&processes_mutex);
     for (int index = 0; index < MAX_WINDOWS; ++index) {
         if (processes[index].active && processes[index].pid == pid) {
@@ -117,7 +122,9 @@ static void ensure_window_slot(pid_t pid) {
     pthread_mutex_unlock(&processes_mutex);
 }
 
+// Actualiza el resultado final de una ventana y la marca como terminada.
 static void update_result(pid_t pid, const char *result) {
+	// Protege la escritura compartida para evitar condiciones de carrera.
     pthread_mutex_lock(&processes_mutex);
     ProcessInfo *process = find_process(pid);
     if (process != NULL) {
@@ -127,7 +134,9 @@ static void update_result(pid_t pid, const char *result) {
     pthread_mutex_unlock(&processes_mutex);
 }
 
+// Muestra en pantalla el resumen de estado de todas las ventanas conocidas.
 static void print_processes(const char *filter) {
+	// Recalcula contadores y refresca datos persistidos antes de imprimir la tabla.
     pthread_mutex_lock(&processes_mutex);
     int running = 0;
     int terminated = 0;
@@ -157,7 +166,9 @@ static void print_processes(const char *filter) {
     pthread_mutex_unlock(&processes_mutex);
 }
 
+// Hilo receptor: escucha eventos TEXT/RESULT enviados por el servidor.
 static void *listen_results(void *arg) {
+	// Parsea cada datagrama y actualiza el estado interno del proceso correspondiente.
     (void)arg;
     while (1) {
         char buffer[MAX_TEXT + 64];
@@ -195,9 +206,12 @@ static void *listen_results(void *arg) {
     return NULL;
 }
 
+// Recolecta hijos terminados para evitar zombies y marcar estado en la tabla.
 static void refresh_children(void) {
+	// Hace waitpid no bloqueante hasta vaciar todos los eventos pendientes.
     int status = 0;
     pid_t child_pid = 0;
+    // Revisa hijos terminados para evitar procesos zombies.
     while ((child_pid = waitpid(-1, &status, WNOHANG)) > 0) {
         pthread_mutex_lock(&processes_mutex);
         ProcessInfo *process = find_process(child_pid);
@@ -208,7 +222,9 @@ static void refresh_children(void) {
     }
 }
 
+// Crea el proceso servidor principal del sistema.
 static pid_t launch_server(void) {
+	// El hijo ejecuta el binario server y el padre recibe su PID.
     pid_t pid = fork();
     if (pid == 0) {
         execl("./server", "./server", LAUNCHER_SOCKET_PATH, NULL);
@@ -217,7 +233,9 @@ static pid_t launch_server(void) {
     return pid;
 }
 
+// Crea una nueva ventana cliente que se conecta al servidor.
 static pid_t launch_window(void) {
+	// El proceso hijo reemplaza su imagen por el ejecutable window.
     pid_t pid = fork();
     if (pid == 0) {
         execl("./window", "./window", SERVER_SOCKET_PATH, NULL);
@@ -226,8 +244,11 @@ static pid_t launch_window(void) {
     return pid;
 }
 
+// Termina todas las ventanas activas que aun no finalizaron.
 static void kill_all_windows(void) {
+	// Recorre la tabla y envia SIGTERM solo a procesos en ejecucion.
     pthread_mutex_lock(&processes_mutex);
+    // Cierra primero las ventanas activas para liberar recursos.
     for (int index = 0; index < MAX_WINDOWS; ++index) {
         if (processes[index].active && !processes[index].terminated) {
             kill(processes[index].pid, SIGTERM);
@@ -236,7 +257,9 @@ static void kill_all_windows(void) {
     pthread_mutex_unlock(&processes_mutex);
 }
 
+// Muestra informacion detallada de una ventana segun PID ingresado por el usuario.
 static void show_details(void) {
+	// Valida el PID solicitado, sincroniza desde disco e imprime texto y resultado.
     char input[32];
     printf("PID: ");
     if (fgets(input, sizeof(input), stdin) == NULL) {
@@ -264,7 +287,9 @@ static void show_details(void) {
     pthread_mutex_unlock(&processes_mutex);
 }
 
+// Solicita un PID por consola y envia la senal de termino a ese proceso.
 static void terminate_process_menu(void) {
+	// Se usa SIGTERM para permitir finalizacion controlada del proceso objetivo.
     char input[32];
     printf("PID a terminar: ");
     if (fgets(input, sizeof(input), stdin) == NULL) {
@@ -276,7 +301,9 @@ static void terminate_process_menu(void) {
     }
 }
 
+// Punto de entrada: inicializa launcher, server e interfaz de control por consola.
 int main(void) {
+	// Configura sockets e hilo receptor, luego atiende el menu interactivo.
     unlink(LAUNCHER_SOCKET_PATH);
     launcher_socket_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (launcher_socket_fd < 0) {
@@ -313,6 +340,7 @@ int main(void) {
     }
 
     char option[32];
+    // Ciclo interactivo del launcher.
     while (1) {
         refresh_children();
         print_processes(NULL);
